@@ -8,8 +8,9 @@ are for their archives. It reads and writes OPEN, AES, and NG archives.
 You need MinGW-w64.
 
 ```bat
-mingw32-make
-mingw32-make test
+build
+build test
+build clean
 ```
 
 ## Usage
