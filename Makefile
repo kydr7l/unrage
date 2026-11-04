@@ -1,3 +1,6 @@
+# Run the recipes in cmd.exe, also when Git Bash puts sh.exe on the PATH.
+SHELL = cmd.exe
+
 CC = gcc
 CXX = g++
 CFLAGS = -std=c99 -O2 -Wall -Wextra -D_FILE_OFFSET_BITS=64
@@ -16,4 +19,4 @@ test: unrage.exe
 	powershell -NoProfile -ExecutionPolicy Bypass -File test.ps1
 
 clean:
-	rm -f unrage unrage.exe unrage.o rpf.o
+	del /q unrage.exe unrage.o rpf.o 2>nul
