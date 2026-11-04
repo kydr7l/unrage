@@ -11,17 +11,23 @@ library, for the archive format and the cryptography.
 
 You need a C99 compiler and a C++17 compiler. On Windows, MinGW-w64 works.
 
-```sh
-make            # on Windows with MinGW: mingw32-make
-make test       # run the round-trip test
+```bat
+mingw32-make            &:: build unrage.exe
+mingw32-make test       &:: run the round-trip test
 ```
 
 To build with no make, compile the two units:
 
-```sh
+```bat
 gcc -std=c99 -O2 -D_FILE_OFFSET_BITS=64 -c rpf.c
 g++ -std=c++17 -O2 -D_FILE_OFFSET_BITS=64 -c unrage.cpp
-g++ -o unrage unrage.o rpf.o
+g++ -o unrage.exe unrage.o rpf.o
+```
+
+To run the test with no make, use PowerShell:
+
+```bat
+powershell -NoProfile -ExecutionPolicy Bypass -File test.ps1
 ```
 
 ## Usage
