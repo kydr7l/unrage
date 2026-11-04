@@ -556,6 +556,32 @@ is_file(const char *path)
 	return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
 }
 
+/* Put the path dir\name in buf. Return false if it is too long. */
+static bool
+cache_file(char *buf, const char *dir, const char *name)
+{
+	int w = snprintf(buf, PATH_LEN, "%s\\%s", dir, name);
+
+	return w > 0 && w < PATH_LEN;
+}
+
+/* Return true if the cache folder dir has all the files that a read needs. */
+static bool
+cache_ok(const char *dir)
+{
+	static const char *const names[] = {
+		"gtav_aes_key.dat", "gtav_ng_key.dat",
+		"gtav_ng_decrypt_tables.dat", "gtav_hash_lut.dat"
+	};
+	char path[PATH_LEN];
+	size_t i;
+
+	for (i = 0; i < sizeof names / sizeof names[0]; i++)
+		if (!cache_file(path, dir, names[i]) || !is_file(path))
+			return false;
+	return true;
+}
+
 /*
  * Put the path of GTA5.exe in buf. Use only -g if it is set. Otherwise,
  * look in each folder above the archive, then in the registry.
@@ -610,11 +636,16 @@ find_exe(char *buf, const char *archive)
 static int
 fetch_keys(const char *archive)
 {
-	char exe[PATH_LEN], dir[PATH_LEN];
+	static const char *const encfiles[] = {
+		"gtav_ng_encrypt_tables.dat", "gtav_ng_encrypt_luts.dat"
+	};
+	char exe[PATH_LEN], dir[PATH_LEN], path[PATH_LEN];
 	const uint8_t *magic = nullptr;
 	HGLOBAL mem = nullptr;
 	HRSRC res;
 	RpfKeys *k;
+	size_t i;
+	bool ok;
 	int err;
 
 	if (find_exe(exe, archive) != 0) {
@@ -640,10 +671,13 @@ fetch_keys(const char *archive)
 		return err;
 	}
 	/* A save error is not fatal. The keys stay in memory. */
-	if (key_cache(dir) != 0 ||
-	    (!CreateDirectoryA(dir, nullptr) &&
-	    GetLastError() != ERROR_ALREADY_EXISTS) ||
-	    rpf_keys_save(k, dir) != 0)
+	ok = key_cache(dir) == 0 && (CreateDirectoryA(dir, nullptr) ||
+	    GetLastError() == ERROR_ALREADY_EXISTS);
+	/* The new keys have no encrypt tables. An old bad file stops each load. */
+	for (i = 0; ok && i < sizeof encfiles / sizeof encfiles[0]; i++)
+		if (cache_file(path, dir, encfiles[i]))
+			DeleteFileA(path);
+	if (!ok || rpf_keys_save(k, dir) != 0)
 		fprintf(stderr, "unrage: cannot save the keys to the cache\n");
 	rpf_keys_free(keys);
 	keys = k;
@@ -701,7 +735,8 @@ main(int argc, char **argv)
 		err = rpf_keys_load(&keys, "keys");
 		if (err != 0 && err != RPF_ENOTFOUND)
 			return fail("keys", err);
-	} else if (key_cache(cache) == 0 && rpf_keys_load(&keys, cache) == 0) {
+	} else if (key_cache(cache) == 0 && cache_ok(cache) &&
+	    rpf_keys_load(&keys, cache) == 0) {
 		cached = true;
 	} else {
 		/* A failed fetch is not fatal. OPEN archives need no keys. */

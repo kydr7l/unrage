@@ -121,6 +121,16 @@ try {
 			Check ((Get-Item "$C\gtav_ng_encrypt_luts.dat").Length -eq 53477376) "the LUTs are not in the cache"
 		}
 
+		# A bad encrypt file in the cache makes one new fetch, not a fetch on each run.
+		[IO.File]::WriteAllBytes("$C\gtav_ng_encrypt_luts.dat", [byte[]](1, 2, 3))
+		Run l test.rpf | Out-Null
+		$err = & $U l test.rpf 2>&1 | Where-Object { $_ -is [Management.Automation.ErrorRecord] }
+		Check ($null -eq $err) "a bad encrypt file in the cache makes a fetch on each run"
+
+		# A cache with a missing part makes a new fetch.
+		Remove-Item "$C\gtav_hash_lut.dat"
+		Check ((Run l $ng) -match 'Encryption: NG') "a cache with a missing part was not fetched again"
+
 		# With no GTA5.exe and no cache, an NG archive fails and names GTA5.exe.
 		Remove-Item -Recurse -Force $C
 		$msg = & $U l "-g$none" $ng 2>&1 | Out-String
