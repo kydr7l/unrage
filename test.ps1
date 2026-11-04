@@ -87,6 +87,27 @@ try {
 	Check ((Run l test.rpf) -match 'b.txt') "d of a missing entry changed the archive"
 	Check (-not (Test-Path test.rpf.unrage-tmp)) "the temporary directory is still there"
 
+	# A nested archive that points at its parent must not make a loop with no end.
+	Run a loop.rpf src\inner.rpf | Out-Null
+	$b = [IO.File]::ReadAllBytes("$T\loop.rpf")
+	$nent = [BitConverter]::ToUInt32($b, 4)
+	$names = 16 + 16 * $nent
+	for ($i = 0; $i -lt $nent; $i++) {
+		$p = 16 + 16 * $i
+		if ([BitConverter]::ToUInt32($b, $p + 4) -eq 0x7FFFFF00) { continue }
+		$at = $names + [BitConverter]::ToUInt16($b, $p)
+		if ([Text.Encoding]::ASCII.GetString($b, $at, 9) -ne 'inner.rpf') { continue }
+		# Offset 0 and the size of the whole file: the entry is the archive itself.
+		$b[$p + 5] = 0; $b[$p + 6] = 0; $b[$p + 7] = 0
+		[BitConverter]::GetBytes([uint32]$b.Length).CopyTo($b, $p + 8)
+	}
+	[IO.File]::WriteAllBytes("$T\loop.rpf", $b)
+	# Do not use $c here: PowerShell names ignore case, and $C is the cache.
+	foreach ($cmd in @('l', '-r'), @('t', '-r'), @('e', '-r', '-oloopout'), @('fix', '-topen')) {
+		& $U @cmd loop.rpf 2>$null | Out-Null
+		Check ($LASTEXITCODE -eq 1) "unrage $cmd on a nested loop gave exit code $LASTEXITCODE, not 1"
+	}
+
 	# With no GTA5.exe and no cache, an OPEN archive works and makes no cache.
 	Remove-Item -Recurse -Force $C -ErrorAction SilentlyContinue
 	$err = & $U l "-g$none" test.rpf 2>&1 | Where-Object { $_ -is [Management.Automation.ErrorRecord] }
@@ -127,6 +148,16 @@ try {
 
 		# The derive of the encrypt tables takes some minutes, so it runs only on request.
 		if ($env:UNRAGE_SLOW) {
+			# The body of a .ysc entry uses NG also in an OPEN archive, so the write needs the encrypt tables.
+			$scripts = 'x64/levels/gta5/script/script_rel.rpf'
+			Run x -oysc1 (Join-Path $gta 'update\update2.rpf') $scripts | Out-Null
+			Run x -oysc "ysc1\$scripts" debug.ysc | Out-Null
+			New-Item -ItemType Directory src2\scripts.rpf | Out-Null
+			Copy-Item ysc\debug.ysc src2\scripts.rpf\
+			Run a ysc.rpf src2\scripts.rpf | Out-Null
+			Run x -r -oyscout ysc.rpf | Out-Null
+			Same ysc\debug.ysc yscout\scripts.rpf\debug.ysc
+
 			Run a -tng ng.rpf src\a.txt | Out-Null
 			Check ((Run l ng.rpf) -match 'Encryption: NG') "a -tng did not write an NG archive"
 			Run x -ong ng.rpf a.txt | Out-Null

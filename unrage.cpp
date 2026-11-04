@@ -162,10 +162,26 @@ open_nested(RpfArchive *a, const struct rpf_entry *e)
 	return rpf_open_nested(&n, a, e) == 0 ? n : NULL;
 }
 
-/* List or test the children of d. buf holds the path of d. */
+/*
+ * A nested archive can point at its parent. The limit stops the loop.
+ * rpf_extract_all has the same limit.
+ */
+constexpr int MAXNEST = 32;
+
+static void
+too_deep(const char *what)
+{
+	fprintf(stderr, "unrage: %s: more than %d levels of nested archives\n",
+	    what, MAXNEST);
+}
+
+/*
+ * List or test the children of d. buf holds the path of d. level is the
+ * number of nested archives above d.
+ */
 static void
 walk(RpfArchive *a, const struct rpf_entry *d, char *buf, int cmd,
-    struct totals *t)
+    struct totals *t, int level)
 {
 	const struct rpf_entry *e;
 	RpfArchive *n;
@@ -183,6 +199,12 @@ walk(RpfArchive *a, const struct rpf_entry *d, char *buf, int cmd,
 			continue;
 		}
 		n = open_nested(a, e);
+		if (n != NULL && level >= MAXNEST) {
+			too_deep(buf);
+			t->errors++;
+			rpf_close(n);
+			n = NULL;
+		}
 		if (cmd == CMD_LIST) {
 			if (e->kind == RPF_KIND_DIR)
 				printf("%12s %12s  D.  %s\n", "", "", buf);
@@ -194,13 +216,13 @@ walk(RpfArchive *a, const struct rpf_entry *d, char *buf, int cmd,
 		}
 		if (e->kind == RPF_KIND_DIR) {
 			t->dirs++;
-			walk(a, e, buf, cmd, t);
+			walk(a, e, buf, cmd, t, level);
 		} else {
 			t->files++;
 			t->size += entry_size(e);
 			t->stored += entry_stored(e);
 			if (n != NULL) {
-				walk(n, rpf_root(n), buf, cmd, t);
+				walk(n, rpf_root(n), buf, cmd, t, level + 1);
 			} else if (cmd == CMD_TEST) {
 				err = rpf_read(a, e, &data, &dlen);
 				if (err != 0) {
@@ -242,7 +264,7 @@ cmd_list(const char *path, int cmd)
 		printf("%12s %12s  Attr  Name\n"
 		    "------------ ------------  ----  ------------\n",
 		    "Size", "Stored");
-	walk(a, rpf_root(a), buf, cmd, &t);
+	walk(a, rpf_root(a), buf, cmd, &t, 0);
 	if (cmd == CMD_LIST)
 		printf("------------ ------------  ----  ------------\n"
 		    "%12llu %12llu        %lu files, %lu folders\n",
@@ -291,10 +313,12 @@ write_out(RpfArchive *a, const struct rpf_entry *e, const char *rel)
 /*
  * Extract the entry e and all entries under it. buf holds the path of e
  * in the archive. If flat is set, put each file in outdir with its own
- * name only. Return the number of errors.
+ * name only. level is the number of nested archives above e. Return the
+ * number of errors.
  */
 static unsigned long
-extract(RpfArchive *a, const struct rpf_entry *e, char *buf, int flat)
+extract(RpfArchive *a, const struct rpf_entry *e, char *buf, int flat,
+    int level)
 {
 	const struct rpf_entry *d;
 	RpfArchive *n;
@@ -307,6 +331,11 @@ extract(RpfArchive *a, const struct rpf_entry *e, char *buf, int flat)
 		return 1;
 	}
 	n = open_nested(a, e);
+	if (n != NULL && level >= MAXNEST) {
+		too_deep(buf);
+		rpf_close(n);
+		return 1;
+	}
 	if (e->kind != RPF_KIND_DIR && n == NULL)
 		return write_out(a, e, flat ? e->name : buf);
 	d = n != NULL ? rpf_root(n) : e;
@@ -317,7 +346,8 @@ extract(RpfArchive *a, const struct rpf_entry *e, char *buf, int flat)
 			errors++;
 			continue;
 		}
-		errors += extract(n != NULL ? n : a, d->children[i], buf, flat);
+		errors += extract(n != NULL ? n : a, d->children[i], buf, flat,
+		    n != NULL ? level + 1 : level);
 		buf[len] = '\0';
 	}
 	rpf_close(n);
@@ -346,7 +376,7 @@ cmd_extract(const char *path, char **paths, int npaths, int flat)
 	}
 	if (npaths == 0) {
 		buf[0] = '\0';
-		errors = extract(a, rpf_root(a), buf, flat);
+		errors = extract(a, rpf_root(a), buf, flat, 0);
 	}
 	for (i = 0; i < npaths; i++) {
 		if ((e = rpf_find(a, paths[i])) == NULL) {
@@ -356,7 +386,7 @@ cmd_extract(const char *path, char **paths, int npaths, int flat)
 			fprintf(stderr, "unrage: %s: path too long\n", paths[i]);
 			errors++;
 		} else {
-			errors += extract(a, e, buf, flat);
+			errors += extract(a, e, buf, flat, 0);
 		}
 	}
 	rpf_close(a);
@@ -497,8 +527,11 @@ save(struct rpf_entry *root, RpfArchive *a, struct nested *n,
 	if (a != NULL)
 		fs::create_directory(tmpdir, ec);
 	err = rpf_write(root, tmp.string().c_str(), enc, keys);
-	/* rpf_write checks the keys before it makes the file. */
-	if (err == RPF_ENOKEY && enc == RPF_ENC_NG && keys != nullptr &&
+	/*
+	 * rpf_write checks the keys before it makes the file. A .ysc body
+	 * uses NG also in an OPEN archive, so only AES needs no tables.
+	 */
+	if (err == RPF_ENOKEY && enc != RPF_ENC_AES && keys != nullptr &&
 	    rpf_keys_derive_encrypt(keys, progress, nullptr) == 0) {
 		err = rpf_write(root, tmp.string().c_str(), enc, keys);
 		if (cached && (key_cache(dir) != 0 ||
@@ -573,11 +606,12 @@ cmd_modify(const char *path, char **paths, int npaths, int del)
 /*
  * Open each nested archive under the directory d of the archive a. Put
  * it in the tree directory t as a nested archive node, and do the same
- * in it. Add each open archive to n. Return 0 or an error.
+ * in it. Add each open archive to n. level is the number of nested
+ * archives above d. Return 0 or an error.
  */
 static int
 nest(RpfArchive *a, const struct rpf_entry *d, struct rpf_entry *t,
-    struct nested *n)
+    struct nested *n, int level)
 {
 	const struct rpf_entry *e;
 	struct rpf_entry *c;
@@ -589,13 +623,15 @@ nest(RpfArchive *a, const struct rpf_entry *d, struct rpf_entry *t,
 		e = d->children[i];
 		c = tree_child(t, e->name, strlen(e->name));
 		if (c != nullptr && e->kind == RPF_KIND_DIR) {
-			if ((err = nest(a, e, c, n)) != 0)
+			if ((err = nest(a, e, c, n, level)) != 0)
 				return err;
 			continue;
 		}
 		if (c == nullptr || e->kind != RPF_KIND_BINARY ||
 		    !is_rpf_name(e->name))
 			continue;
+		if (level >= MAXNEST)
+			return too_deep(e->name), RPF_EFORMAT;
 		if ((err = rpf_open_nested(&sub, a, e)) != 0)
 			return fail(e->name, err), err;
 		if (!(v = (RpfArchive **)realloc(n->v,
@@ -609,7 +645,7 @@ nest(RpfArchive *a, const struct rpf_entry *d, struct rpf_entry *t,
 		if ((err = rpf_tree_add_archive(t, e->name, sub)) != 0)
 			return fail(e->name, err), err;
 		c = tree_child(t, e->name, strlen(e->name));
-		if ((err = nest(sub, rpf_root(sub), c, n)) != 0)
+		if ((err = nest(sub, rpf_root(sub), c, n, level + 1)) != 0)
 			return err;
 	}
 	return 0;
@@ -633,7 +669,7 @@ cmd_fix(const char *path)
 		rpf_close(a);
 		return fail(path, err);
 	}
-	if (nest(a, rpf_root(a), root, &n) != 0) {
+	if (nest(a, rpf_root(a), root, &n, 0) != 0) {
 		rpf_tree_free(root);
 		close_nested(&n);
 		rpf_close(a);
@@ -845,18 +881,21 @@ main(int argc, char **argv)
 		fetch_keys(pos[1]);
 	}
 
-	switch (fix ? '\0' : pos[0][0]) {
-	case '\0': ret = cmd_fix(pos[1]); break;
-	case 'l': ret = cmd_list(pos[1], CMD_LIST); break;
-	case 't': ret = cmd_list(pos[1], CMD_TEST); break;
-	case 'e': ret = cmd_extract(pos[1], pos + 2, npos - 2, 1); break;
-	case 'x': ret = cmd_extract(pos[1], pos + 2, npos - 2, 0); break;
-	case 'a': ret = cmd_modify(pos[1], pos + 2, npos - 2, 0); break;
-	case 'd': ret = cmd_modify(pos[1], pos + 2, npos - 2, 1); break;
-	default:
-		fprintf(stderr, "unrage: unknown command %s\n", pos[0]);
-		usage();
-		ret = 2;
+	if (fix) {
+		ret = cmd_fix(pos[1]);
+	} else {
+		switch (pos[0][0]) {
+		case 'l': ret = cmd_list(pos[1], CMD_LIST); break;
+		case 't': ret = cmd_list(pos[1], CMD_TEST); break;
+		case 'e': ret = cmd_extract(pos[1], pos + 2, npos - 2, 1); break;
+		case 'x': ret = cmd_extract(pos[1], pos + 2, npos - 2, 0); break;
+		case 'a': ret = cmd_modify(pos[1], pos + 2, npos - 2, 0); break;
+		case 'd': ret = cmd_modify(pos[1], pos + 2, npos - 2, 1); break;
+		default:
+			fprintf(stderr, "unrage: unknown command %s\n", pos[0]);
+			usage();
+			ret = 2;
+		}
 	}
 	rpf_keys_free(keys);
 	free(pos);
