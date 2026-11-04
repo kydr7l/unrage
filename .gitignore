@@ -1,0 +1,14 @@
+# Build output
+*.o
+*.obj
+*.exe
+/unrage
+
+# Key material: do not publish the keys
+keys/
+*.dat
+
+# Game archives and extracted files
+*.rpf
+*.unrage-tmp/
+out/
