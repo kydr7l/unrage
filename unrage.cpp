@@ -29,6 +29,12 @@ struct totals {
 	unsigned long files, dirs, errors;
 };
 
+/* The open nested archives that a tree reads from. */
+struct nested {
+	RpfArchive **v;
+	size_t len;
+};
+
 static RpfKeys *keys;
 static const char *gtaexe;	/* -g<path>: the only GTA5.exe to use */
 static const char *keynote;	/* the reason that the last fetch failed */
@@ -50,13 +56,14 @@ usage(void)
 "  x   extract files with full paths\n"
 "  a   add files and directories, make the archive if necessary\n"
 "  d   delete entries\n"
+"  fix write the archive and its nested archives again as NG\n"
 "\n"
 "switches:\n"
 "  -o<dir>          write extracted files under dir (default .)\n"
 "  -k<dir>          load the keys from dir (default ./keys if it exists)\n"
 "  -g<path>         make the keys from this GTA5.exe if necessary\n"
 "  -r               go into nested .rpf archives (l, t, e, x)\n"
-"  -t<open|aes|ng>  encryption of the new archive (a, d)\n"
+"  -t<open|aes|ng>  encryption of the new archive (a, d, fix)\n"
 "  --               stop the parse of switches\n", stderr);
 }
 
@@ -459,14 +466,26 @@ progress(const char *msg, void *ud)
 	fprintf(stderr, "unrage: %s\n", msg);
 }
 
+/* Close the archives of n, the last one first, and free the list. */
+static void
+close_nested(struct nested *n)
+{
+	while (n->len > 0)
+		rpf_close(n->v[--n->len]);
+	free(n->v);
+	n->v = nullptr;
+}
+
 /*
  * Write the tree root as the archive path. If a is not NULL, it is the
  * open archive at path. Then write to a temporary directory with the
  * same file name, because the NG key comes from the file name. Then
- * replace path. Free root and close a.
+ * replace path. Free root, close the archives of n if n is not NULL,
+ * and close a.
  */
 static int
-save(struct rpf_entry *root, RpfArchive *a, const char *path, int enc)
+save(struct rpf_entry *root, RpfArchive *a, struct nested *n,
+    const char *path, int enc)
 {
 	std::error_code ec;
 	fs::path tmpdir = fs::path(path).concat(".unrage-tmp");
@@ -488,6 +507,9 @@ save(struct rpf_entry *root, RpfArchive *a, const char *path, int enc)
 			    "unrage: cannot save the keys to the cache\n");
 	}
 	rpf_tree_free(root);
+	/* A nested archive shares the file of a. Close it first. */
+	if (n != nullptr)
+		close_nested(n);
 	rpf_close(a);
 	if (a == NULL)
 		return err;
@@ -542,7 +564,84 @@ cmd_modify(const char *path, char **paths, int npaths, int del)
 	if (enc < 0)
 		enc = a != NULL && rpf_encryption(a) != 0 ? rpf_encryption(a) :
 		    RPF_ENC_OPEN;
-	if ((err = save(root, a, path, enc)) != 0)
+	if ((err = save(root, a, nullptr, path, enc)) != 0)
+		return fail(path, err);
+	printf("Everything is Ok\n");
+	return 0;
+}
+
+/*
+ * Open each nested archive under the directory d of the archive a. Put
+ * it in the tree directory t as a nested archive node, and do the same
+ * in it. Add each open archive to n. Return 0 or an error.
+ */
+static int
+nest(RpfArchive *a, const struct rpf_entry *d, struct rpf_entry *t,
+    struct nested *n)
+{
+	const struct rpf_entry *e;
+	struct rpf_entry *c;
+	RpfArchive *sub, **v;
+	size_t i;
+	int err;
+
+	for (i = 0; i < d->nchildren; i++) {
+		e = d->children[i];
+		c = tree_child(t, e->name, strlen(e->name));
+		if (c != nullptr && e->kind == RPF_KIND_DIR) {
+			if ((err = nest(a, e, c, n)) != 0)
+				return err;
+			continue;
+		}
+		if (c == nullptr || e->kind != RPF_KIND_BINARY ||
+		    !is_rpf_name(e->name))
+			continue;
+		if ((err = rpf_open_nested(&sub, a, e)) != 0)
+			return fail(e->name, err), err;
+		if (!(v = (RpfArchive **)realloc(n->v,
+		    (n->len + 1) * sizeof *v))) {
+			rpf_close(sub);
+			return fail(e->name, RPF_ENOMEM), RPF_ENOMEM;
+		}
+		n->v = v;
+		n->v[n->len++] = sub;
+		/* The new node replaces c. */
+		if ((err = rpf_tree_add_archive(t, e->name, sub)) != 0)
+			return fail(e->name, err), err;
+		c = tree_child(t, e->name, strlen(e->name));
+		if ((err = nest(sub, rpf_root(sub), c, n)) != 0)
+			return err;
+	}
+	return 0;
+}
+
+/*
+ * Write the archive path again with the encryption of -t, or NG. Write
+ * each nested archive again with the same encryption.
+ */
+static int
+cmd_fix(const char *path)
+{
+	struct nested n = {nullptr, 0};
+	struct rpf_entry *root;
+	RpfArchive *a;
+	int err;
+
+	if ((err = rpf_open(&a, path, keys)) != 0)
+		return fail(path, err);
+	if ((err = rpf_tree_from_archive(&root, a)) != 0) {
+		rpf_close(a);
+		return fail(path, err);
+	}
+	if (nest(a, rpf_root(a), root, &n) != 0) {
+		rpf_tree_free(root);
+		close_nested(&n);
+		rpf_close(a);
+		return 1;
+	}
+	err = save(root, a, &n, path, encryption < 0 ? RPF_ENC_NG :
+	    encryption);
+	if (err != 0)
 		return fail(path, err);
 	printf("Everything is Ok\n");
 	return 0;
@@ -692,6 +791,7 @@ main(int argc, char **argv)
 	char cache[PATH_LEN];
 	char **pos;
 	int npos = 0, switches = 1, err, i, ret;
+	bool fix;
 
 	pos = (char **)malloc(argc * sizeof *pos);
 	if (pos == NULL)
@@ -723,7 +823,9 @@ main(int argc, char **argv)
 			return 2;
 		}
 	}
-	if (npos < 2 || strlen(pos[0]) != 1) {
+	fix = npos > 0 && strcmp(pos[0], "fix") == 0;
+	/* fix takes the archive only. */
+	if (npos < 2 || (!fix && strlen(pos[0]) != 1) || (fix && npos != 2)) {
 		usage();
 		return 2;
 	}
@@ -743,7 +845,8 @@ main(int argc, char **argv)
 		fetch_keys(pos[1]);
 	}
 
-	switch (pos[0][0]) {
+	switch (fix ? '\0' : pos[0][0]) {
+	case '\0': ret = cmd_fix(pos[1]); break;
 	case 'l': ret = cmd_list(pos[1], CMD_LIST); break;
 	case 't': ret = cmd_list(pos[1], CMD_TEST); break;
 	case 'e': ret = cmd_extract(pos[1], pos + 2, npos - 2, 1); break;

@@ -27,6 +27,19 @@ function SameTree($a, $b) {
 	foreach ($f in $fa) { Same "$ra$f" "$rb$f" }
 }
 
+# Run fix with the switches sw on a copy of test.rpf. The archive and its nested
+# archive inner.rpf must get the encryption enc, and the files must not change.
+function Fixed($name, $enc, [string[]]$sw) {
+	Copy-Item test.rpf $name
+	Run fix @sw $name | Out-Null
+	Check ((Run l $name) -match "Encryption: $enc") "fix $sw $name did not write an $enc archive"
+	Run x "-o$name.n" $name inner.rpf | Out-Null
+	Check ((Run l "$name.n\inner.rpf") -match "Encryption: $enc") "fix $sw did not convert the nested archive"
+	Run x -r "-o$name.ref" test.rpf | Out-Null
+	Run x -r "-o$name.all" $name | Out-Null
+	SameTree "$name.ref" "$name.all"
+}
+
 New-Item -ItemType Directory $T | Out-Null
 Push-Location $T
 try {
@@ -119,6 +132,9 @@ try {
 			Run x -ong ng.rpf a.txt | Out-Null
 			Same src\a.txt ng\a.txt
 			Check ((Get-Item "$C\gtav_ng_encrypt_luts.dat").Length -eq 53477376) "the LUTs are not in the cache"
+
+			# With no -t, fix writes NG.
+			Fixed fixng.rpf NG
 		}
 
 		# A bad encrypt file in the cache makes one new fetch, not a fetch on each run.
@@ -130,6 +146,9 @@ try {
 		# A cache with a missing part makes a new fetch.
 		Remove-Item "$C\gtav_hash_lut.dat"
 		Check ((Run l $ng) -match 'Encryption: NG') "a cache with a missing part was not fetched again"
+
+		# fix converts the nested archives too. AES needs only the AES key, so this test is fast.
+		Fixed fix.rpf AES '-taes'
 
 		# With no GTA5.exe and no cache, an NG archive fails and names GTA5.exe.
 		Remove-Item -Recurse -Force $C

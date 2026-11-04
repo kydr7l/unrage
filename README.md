@@ -27,6 +27,7 @@ unrage <command> [switches] <archive> [paths...]
 | `x` | Extract files with full paths. |
 | `a` | Add files and directories. |
 | `d` | Delete entries. |
+| `fix` | Write the archive and all its nested archives again as NG. |
 
 | Switch | Action |
 |--------|--------|
@@ -34,14 +35,18 @@ unrage <command> [switches] <archive> [paths...]
 | `-k<dir>` | Load the keys from `dir`. The default is `keys`. |
 | `-g<path>` | Make the keys from the `GTA5.exe` at `path`. |
 | `-r` | Go into nested `.rpf` archives. |
-| `-t<open\|aes\|ng>` | Set the encryption of the archive that `a` or `d` writes. |
+| `-t<open\|aes\|ng>` | Set the encryption of the archive that `a`, `d`, or `fix` writes. |
 
 ```bat
 unrage l -r common.rpf
 unrage x -r -oout common.rpf
 unrage a mymod.rpf stream
 unrage d dlc.rpf data/old
+unrage fix dlc.rpf
 ```
+
+`a` and `d` copy a nested archive as it is. `fix` writes each nested archive
+again with the encryption of the outer archive.
 
 ## Keys
 

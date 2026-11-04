@@ -419,6 +419,18 @@ int rpf_tree_new(struct rpf_entry **root);
 int rpf_tree_from_archive(struct rpf_entry **root, RpfArchive *a);
 
 /*
+ * Add a nested archive node name to parent, with a copy of the entries
+ * of the open archive a. Each file of the node gets its data from a.
+ * rpf_write writes the node as a .rpf entry with the encryption of the
+ * new archive. An entry with the same name is replaced. Use this with
+ * rpf_open_nested to change the encryption of a nested archive. The
+ * archive must stay open until rpf_write returns. Return 0, RPF_EINVAL,
+ * or RPF_ENOMEM.
+ */
+int rpf_tree_add_archive(struct rpf_entry *parent, const char *name,
+    RpfArchive *a);
+
+/*
  * Make a new tree with the files and directories under the directory
  * dir on disk. Each file of the tree gets its data from its path. A
  * subdirectory with a name that ends in ".rpf" becomes a nested archive
@@ -4299,6 +4311,31 @@ rpf_tree_from_archive(struct rpf_entry **root, RpfArchive *a)
 {
 	*root = rpf__tree_copy(a->root, a);
 	return *root == NULL ? RPF_ENOMEM : 0;
+}
+
+int
+rpf_tree_add_archive(struct rpf_entry *parent, const char *name,
+    RpfArchive *a)
+{
+	struct rpf_entry *e;
+	char *n;
+
+	if (parent == NULL || parent->kind != RPF_KIND_DIR ||
+	    !rpf__name_ok(name) || a == NULL)
+		return RPF_EINVAL;
+	e = rpf__tree_copy(a->root, a);
+	n = RPF_MALLOC(strlen(name) + 1);
+	if (e == NULL || n == NULL) {
+		rpf_tree_free(e);
+		RPF_FREE(n);
+		return RPF_ENOMEM;
+	}
+	/* The copy of the root has an empty name. */
+	strcpy(n, name);
+	RPF_FREE(e->name);
+	e->name = n;
+	e->nested = 1;
+	return rpf__tree_link(parent, e);
 }
 
 /*
