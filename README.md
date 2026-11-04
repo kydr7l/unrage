@@ -5,7 +5,8 @@ are for their archives. It reads and writes OPEN, AES, and NG archives.
 
 ## Build
 
-You need MinGW-w64.
+You need Visual Studio 2022 or its Build Tools, with the C++ tools.
+`build.bat` finds them, so a Developer Command Prompt is not necessary.
 
 ```bat
 build
