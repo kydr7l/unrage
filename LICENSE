@@ -16,7 +16,8 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 -------------------------------------------------------------------------------
 
-rpf.h ports parts of CodeWalker. The license notice of CodeWalker follows.
+rpf.h ports parts of CodeWalker, and magic.dat comes from CodeWalker. The
+license notice of CodeWalker follows.
 
 Copyright(c) 2017-2019 dexyfex
 Copyright(c) 2015 Neodymium

@@ -1,12 +1,15 @@
 # Build output
 *.o
 *.obj
+*.res
 *.exe
 /unrage
 
 # Key material: do not publish the keys
 keys/
 *.dat
+# magic.dat is the obfuscated key resource of CodeWalker. unrage.exe embeds it.
+!magic.dat
 
 # Game archives and extracted files
 *.rpf

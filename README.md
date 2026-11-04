@@ -32,6 +32,7 @@ unrage <command> [switches] <archive> [paths...]
 |--------|--------|
 | `-o<dir>` | Write the extracted files under `dir`. |
 | `-k<dir>` | Load the keys from `dir`. The default is `keys`. |
+| `-g<path>` | Make the keys from the `GTA5.exe` at `path`. |
 | `-r` | Go into nested `.rpf` archives. |
 | `-t<open\|aes\|ng>` | Set the encryption of the archive that `a` or `d` writes. |
 
@@ -44,8 +45,21 @@ unrage d dlc.rpf data/old
 
 ## Keys
 
-AES and NG archives need keys. Use a CodeWalker key dump directory. The keys
-are not part of this repository.
+AES and NG archives need keys. unrage looks for the keys in this order:
+
+1. The directory that `-k<dir>` gives.
+2. The directory `keys`.
+3. The cache directory `%TEMP%\unrage-keys`.
+4. A new key set that unrage makes.
+
+unrage makes the keys only if you do not give `-k` and `keys` does not exist.
+It finds the AES key in `GTA5.exe` and uses it to decode `magic.dat`. Then it
+saves the keys in the cache directory. unrage finds `GTA5.exe` with
+`-g<path>`, or in the directories above the archive, or in the registry.
+`magic.dat` comes from [CodeWalker](https://github.com/dexyfex/CodeWalker),
+and `unrage.exe` contains it.
+
+A key directory can also be a CodeWalker key dump directory.
 
 Do not rename an NG archive or an entry in it. The NG encryption uses the
 names.

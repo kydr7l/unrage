@@ -5,7 +5,7 @@ setlocal
 cd /d "%~dp0"
 
 if "%~1"=="clean" (
-	del /q unrage.exe *.obj 2>nul
+	del /q unrage.exe unrage.res *.obj 2>nul
 	exit /b 0
 )
 
@@ -14,7 +14,8 @@ where cl >nul 2>nul || call :vcvars || exit /b 1
 
 rem rpf.h is C and does not compile as C++, so compile it as C.
 cl /nologo /std:c11 /O2 /W4 /c rpf.c || exit /b 1
-cl /nologo /std:c++17 /O2 /W4 /EHsc /Feunrage.exe unrage.cpp rpf.obj || exit /b 1
+rc /nologo unrage.rc || exit /b 1
+cl /nologo /std:c++17 /O2 /W4 /EHsc /Feunrage.exe unrage.cpp rpf.obj unrage.res advapi32.lib || exit /b 1
 
 if "%~1"=="test" powershell -NoProfile -ExecutionPolicy Bypass -File test.ps1
 exit /b %errorlevel%

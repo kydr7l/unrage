@@ -1,0 +1,2 @@
+/* Embed the magic.dat of CodeWalker. unrage decodes it with the AES key. */
+MAGIC RCDATA "magic.dat"

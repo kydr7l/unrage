@@ -30,6 +30,12 @@ function SameTree($a, $b) {
 New-Item -ItemType Directory $T | Out-Null
 Push-Location $T
 try {
+	# Isolate the key cache. GetTempPathA reads TMP first, then TEMP.
+	$env:TMP = $env:TEMP = "$T\tmp"
+	New-Item -ItemType Directory $env:TMP | Out-Null
+	$C = "$T\tmp\unrage-keys"
+	$none = "$T\none.exe"
+
 	New-Item -ItemType Directory src\data\sub, src\inner.rpf\deep | Out-Null
 	Set-Content src\a.txt hello
 	Set-Content src\data\b.txt world
@@ -67,6 +73,53 @@ try {
 	Check ($LASTEXITCODE -ne 0) "d of a missing entry did not fail"
 	Check ((Run l test.rpf) -match 'b.txt') "d of a missing entry changed the archive"
 	Check (-not (Test-Path test.rpf.unrage-tmp)) "the temporary directory is still there"
+
+	# With no GTA5.exe and no cache, an OPEN archive works and makes no cache.
+	Remove-Item -Recurse -Force $C -ErrorAction SilentlyContinue
+	$err = & $U l "-g$none" test.rpf 2>&1 | Where-Object { $_ -is [Management.Automation.ErrorRecord] }
+	Check ($LASTEXITCODE -eq 0) "l of an OPEN archive with no keys failed"
+	Check ($null -eq $err) "l of an OPEN archive with no keys wrote to stderr"
+	Check (-not (Test-Path $C)) "the cache was made with no GTA5.exe"
+
+	# Find GTA5.exe as unrage does. Skip the key tests if it is not installed.
+	$gta = $null
+	$reg = Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Rockstar Games\Grand Theft Auto V' -ErrorAction SilentlyContinue
+	foreach ($v in 'InstallFolder', 'InstallFolderSteam', 'InstallFolderEpic') {
+		if (-not $gta -and $reg.$v -and (Test-Path (Join-Path $reg.$v 'GTA5.exe'))) { $gta = $reg.$v }
+	}
+	if ($gta) {
+		$ng = Join-Path $gta 'update\update.rpf'
+
+		# The first NG list fetches the keys into the cache.
+		$out = Run l "-g$(Join-Path $gta 'GTA5.exe')" $ng
+		Check ($out[0] -eq "Archive: $ng") "the fetch changed stdout"
+		Check ($out -match 'Encryption: NG') "l of the NG archive failed"
+		foreach ($f in @{ 'gtav_aes_key.dat' = 32; 'gtav_ng_key.dat' = 27472;
+		    'gtav_ng_decrypt_tables.dat' = 278528; 'gtav_hash_lut.dat' = 256 }.GetEnumerator()) {
+			Check ((Get-Item "$C\$($f.Key)").Length -eq $f.Value) "$($f.Key) has the wrong size"
+		}
+
+		# The second list uses only the cache.
+		Check ((Run l "-g$none" $ng) -match 'Encryption: NG') "the cache did not work"
+
+		# A cache file with a wrong size makes a new fetch. The walk up finds GTA5.exe.
+		[IO.File]::WriteAllBytes("$C\gtav_aes_key.dat", [byte[]](1, 2, 3, 4, 5))
+		Run l $ng | Out-Null
+		Check ((Get-Item "$C\gtav_aes_key.dat").Length -eq 32) "a bad cache was not fetched again"
+
+		# The walk up from $T finds no GTA5.exe, so only the registry can find it.
+		Remove-Item -Recurse -Force $C
+		Run l test.rpf | Out-Null
+		Check (Test-Path "$C\gtav_ng_key.dat") "the registry did not find GTA5.exe"
+
+		# With no GTA5.exe and no cache, an NG archive fails and names GTA5.exe.
+		Remove-Item -Recurse -Force $C
+		$msg = & $U l "-g$none" $ng 2>&1 | Out-String
+		Check ($LASTEXITCODE -eq 1) "l of an NG archive with no keys did not fail"
+		Check ($msg -match 'GTA5\.exe' -and $msg -match '-g') "the key error does not name GTA5.exe and -g"
+	} else {
+		Write-Output "skip: GTA5.exe is not installed, so the key tests did not run"
+	}
 
 	Write-Output "all tests passed"
 } catch {

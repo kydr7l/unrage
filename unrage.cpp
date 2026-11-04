@@ -13,6 +13,10 @@ extern "C" {
 #include <filesystem>
 #include <system_error>
 
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+
 namespace fs = std::filesystem;
 
 /* rpf.c uses the default RPF_FREE, so free() frees the buffers of rpf_read. */
@@ -26,6 +30,9 @@ struct totals {
 };
 
 static RpfKeys *keys;
+static const char *gtaexe;	/* -g<path>: the only GTA5.exe to use */
+static const char *keynote;	/* the reason that the last fetch failed */
+static bool cached;		/* keys came from the cache folder or a fetch */
 static const char *outdir = ".";
 static int recurse;
 static int encryption = -1;	/* -1 keeps the encryption of the archive */
@@ -47,6 +54,7 @@ usage(void)
 "switches:\n"
 "  -o<dir>          write extracted files under dir (default .)\n"
 "  -k<dir>          load the keys from dir (default ./keys if it exists)\n"
+"  -g<path>         make the keys from this GTA5.exe if necessary\n"
 "  -r               go into nested .rpf archives (l, t, e, x)\n"
 "  -t<open|aes|ng>  encryption of the new archive (a, d)\n"
 "  --               stop the parse of switches\n", stderr);
@@ -56,6 +64,8 @@ static int
 fail(const char *what, int err)
 {
 	fprintf(stderr, "unrage: %s: %s\n", what, rpf_strerror(err));
+	if (err == RPF_ENOKEY && keynote != nullptr)
+		fprintf(stderr, "unrage: keys: %s\n", keynote);
 	return 1;
 }
 
@@ -508,10 +518,127 @@ cmd_modify(const char *path, char **paths, int npaths, int del)
 	return 0;
 }
 
+/* Put the path of the key cache folder in buf. Return 0 or -1. */
+static int
+key_cache(char *buf)
+{
+	static const char name[] = "unrage-keys";
+	DWORD n = GetTempPathA(PATH_LEN, buf);
+
+	if (n == 0 || n + sizeof name > PATH_LEN)
+		return -1;
+	memcpy(buf + n, name, sizeof name);
+	return 0;
+}
+
+static bool
+is_file(const char *path)
+{
+	DWORD a = GetFileAttributesA(path);
+
+	return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+/*
+ * Put the path of GTA5.exe in buf. Use only -g if it is set. Otherwise,
+ * look in each folder above the archive, then in the registry.
+ */
+static int
+find_exe(char *buf, const char *archive)
+{
+	static const char *const values[] = {
+		"InstallFolder", "InstallFolderSteam", "InstallFolderEpic"
+	};
+	char dir[PATH_LEN];
+	DWORD n, size;
+	size_t i, len;
+	char *p;
+	int w;
+
+	if (gtaexe != nullptr) {
+		w = snprintf(buf, PATH_LEN, "%s", gtaexe);
+		return w > 0 && w < PATH_LEN && is_file(buf) ? 0 :
+		    RPF_ENOTFOUND;
+	}
+	/* GetFullPathNameA also accepts a path that does not exist. */
+	n = GetFullPathNameA(archive, PATH_LEN, dir, nullptr);
+	if (n > 0 && n < PATH_LEN) {
+		while ((p = strrchr(dir, '\\')) != nullptr) {
+			*p = '\0';
+			w = snprintf(buf, PATH_LEN, "%s\\GTA5.exe", dir);
+			if (w > 0 && w < PATH_LEN && is_file(buf))
+				return 0;
+		}
+	}
+	for (i = 0; i < sizeof values / sizeof values[0]; i++) {
+		size = PATH_LEN;
+		if (RegGetValueA(HKEY_LOCAL_MACHINE,
+		    "SOFTWARE\\WOW6432Node\\Rockstar Games\\Grand Theft Auto V",
+		    values[i], RRF_RT_REG_SZ, nullptr, dir, &size) !=
+		    ERROR_SUCCESS)
+			continue;
+		len = strlen(dir);
+		w = snprintf(buf, PATH_LEN, "%s%sGTA5.exe", dir,
+		    len > 0 && dir[len - 1] == '\\' ? "" : "\\");
+		if (w > 0 && w < PATH_LEN && is_file(buf))
+			return 0;
+	}
+	return RPF_ENOTFOUND;
+}
+
+/*
+ * Make the read keys from GTA5.exe and the embedded magic.dat. Save them
+ * to the cache folder and replace keys. On an error, set keynote.
+ */
+static int
+fetch_keys(const char *archive)
+{
+	char exe[PATH_LEN], dir[PATH_LEN];
+	const uint8_t *magic = nullptr;
+	HGLOBAL mem = nullptr;
+	HRSRC res;
+	RpfKeys *k;
+	int err;
+
+	if (find_exe(exe, archive) != 0) {
+		keynote = "GTA5.exe not found; use -g<path> to GTA5.exe or "
+		    "-k<dir>";
+		return RPF_ENOTFOUND;
+	}
+	fprintf(stderr, "unrage: make the keys from %s\n", exe);
+	if ((err = rpf_keys_extract(&k, exe, nullptr, nullptr)) != 0) {
+		keynote = rpf_strerror(err);
+		return err;
+	}
+	if ((res = FindResourceA(nullptr, "MAGIC", RT_RCDATA)) != nullptr)
+		mem = LoadResource(nullptr, res);
+	if (mem != nullptr)
+		magic = (const uint8_t *)LockResource(mem);
+	err = magic != nullptr ?
+	    rpf_keys_magic(k, magic, SizeofResource(nullptr, res)) :
+	    RPF_ENOTFOUND;
+	if (err != 0) {
+		rpf_keys_free(k);
+		keynote = rpf_strerror(err);
+		return err;
+	}
+	/* A save error is not fatal. The keys stay in memory. */
+	if (key_cache(dir) != 0 ||
+	    (!CreateDirectoryA(dir, nullptr) &&
+	    GetLastError() != ERROR_ALREADY_EXISTS) ||
+	    rpf_keys_save(k, dir) != 0)
+		fprintf(stderr, "unrage: cannot save the keys to the cache\n");
+	rpf_keys_free(keys);
+	keys = k;
+	cached = true;
+	return 0;
+}
+
 int
 main(int argc, char **argv)
 {
 	const char *keydir = NULL;
+	char cache[PATH_LEN];
 	char **pos;
 	int npos = 0, switches = 1, err, i, ret;
 
@@ -529,6 +656,8 @@ main(int argc, char **argv)
 			outdir = s + 2;
 		} else if (s[1] == 'k' && s[2] != '\0') {
 			keydir = s + 2;
+		} else if (s[1] == 'g' && s[2] != '\0') {
+			gtaexe = s + 2;
 		} else if (strcmp(s, "-r") == 0) {
 			recurse = 1;
 		} else if (ieqn(s, "-topen", 7)) {
@@ -555,6 +684,11 @@ main(int argc, char **argv)
 		err = rpf_keys_load(&keys, "keys");
 		if (err != 0 && err != RPF_ENOTFOUND)
 			return fail("keys", err);
+	} else if (key_cache(cache) == 0 && rpf_keys_load(&keys, cache) == 0) {
+		cached = true;
+	} else {
+		/* A failed fetch is not fatal. OPEN archives need no keys. */
+		fetch_keys(pos[1]);
 	}
 
 	switch (pos[0][0]) {

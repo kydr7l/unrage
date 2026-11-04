@@ -66,7 +66,9 @@
  *   executables have only the AES key and the hash LUT. For this
  *   reason, the NG keys and the NG decrypt tables must come from a key
  *   dump folder. The tool test/magic2keys.c makes this folder from the
- *   magic.dat file of CodeWalker. README.md tells how to use it. Then
+ *   magic.dat file of CodeWalker. README.md tells how to use it. Or
+ *   call rpf_keys_magic with the bytes of magic.dat to fill these parts
+ *   in memory. It needs the AES key from rpf_keys_extract. Then
  *   call rpf_keys_derive_encrypt one time to make the NG encrypt tables
  *   and the LUTs. This takes some minutes. Save the result with
  *   rpf_keys_save.
@@ -230,6 +232,16 @@ int rpf_keys_save(const RpfKeys *keys, const char *dir);
  */
 int rpf_keys_extract(RpfKeys **out, const char *exepath,
     void (*progress)(const char *, void *), void *ud);
+
+/*
+ * Decode the len bytes at magic. This is the magic.dat resource of
+ * CodeWalker. k must have the AES key. Fill the NG keys, the NG decrypt
+ * tables, and the hash LUT of k. Replace a part that k has. Do not
+ * change magic. Return 0, RPF_ENOKEY if k has no AES key, RPF_EFORMAT
+ * if magic does not decode or a part does not agree with its SHA-1
+ * digest, or RPF_ENOMEM. On an error, do not change k.
+ */
+int rpf_keys_magic(RpfKeys *k, const uint8_t *magic, size_t len);
 
 /*
  * Derive the NG encrypt tables and LUTs from the decrypt tables. This
@@ -3146,6 +3158,221 @@ rpf_keys_extract(RpfKeys **out, const char *exepath,
 	}
 	*out = k;
 	return err;
+}
+
+/*
+ * The decode of the magic.dat resource of CodeWalker. The algorithm
+ * comes from UseMagicData in GTAKeys.cs of CodeWalker.
+ */
+
+#define RPF__MG_NGKEYS (101 * 272)
+#define RPF__MG_DECTABLES (17 * 16 * 256 * 4)
+#define RPF__MG_HASHLUT 256
+#define RPF__MG_AWCKEY 16
+#define RPF__MG_PLAIN \
+	(RPF__MG_NGKEYS + RPF__MG_DECTABLES + RPF__MG_HASHLUT + RPF__MG_AWCKEY)
+
+/*
+ * The state of the seeded System.Random of .NET. This is the legacy
+ * subtractive generator of Knuth.
+ */
+struct rpf__netrand {
+	int seed[56];
+	int inext;
+	int inextp;
+};
+
+/*
+ * Return v as an int with the two's complement rule. C99 defines this
+ * for every v. A plain cast of a value above INT32_MAX does not have a
+ * defined result.
+ */
+static int
+rpf__s32(uint32_t v)
+{
+	return v >= 0x80000000u ? -(int)(0xFFFFFFFFu - v) - 1 : (int)v;
+}
+
+/*
+ * Return a - b with the wrap of 32-bit arithmetic, as unchecked .NET
+ * code does. Signed overflow in C has no defined result.
+ */
+static int
+rpf__wsub(int a, int b)
+{
+	return rpf__s32((uint32_t)a - (uint32_t)b);
+}
+
+/* Set the state of the generator from the seed, as .NET does. */
+static void
+rpf__netrand_init(struct rpf__netrand *r, int seed)
+{
+	int ii, mj, mk, i, k, sub;
+
+	if (seed == INT32_MIN)
+		sub = INT32_MAX;
+	else
+		sub = seed < 0 ? -seed : seed;
+	mj = 161803398 - sub;
+	r->seed[55] = mj;
+	mk = 1;
+	for (i = 1; i < 55; i++) {
+		ii = (21 * i) % 55;
+		r->seed[ii] = mk;
+		mk = mj - mk;
+		if (mk < 0)
+			mk += INT32_MAX;
+		mj = r->seed[ii];
+	}
+	for (k = 1; k < 5; k++) {
+		for (i = 1; i < 56; i++) {
+			r->seed[i] = rpf__wsub(r->seed[i],
+			    r->seed[1 + (i + 30) % 55]);
+			if (r->seed[i] < 0)
+				r->seed[i] += INT32_MAX;
+		}
+	}
+	r->inext = 0;
+	r->inextp = 21;
+}
+
+/* Return the next sample of the generator, 0 to INT32_MAX - 1. */
+static int
+rpf__netrand_sample(struct rpf__netrand *r)
+{
+	int a, b, v;
+
+	a = r->inext + 1;
+	if (a >= 56)
+		a = 1;
+	b = r->inextp + 1;
+	if (b >= 56)
+		b = 1;
+	v = rpf__wsub(r->seed[a], r->seed[b]);
+	if (v == INT32_MAX)
+		v--;
+	if (v < 0)
+		v += INT32_MAX;
+	r->seed[a] = v;
+	r->inext = a;
+	r->inextp = b;
+	return v;
+}
+
+/* Subtract n bytes of NextBytes from buf, byte by byte, modulo 256. */
+static void
+rpf__netrand_sub(struct rpf__netrand *r, uint8_t *buf, size_t n)
+{
+	size_t i;
+
+	for (i = 0; i < n; i++)
+		buf[i] = (uint8_t)(buf[i] - rpf__netrand_sample(r) % 256);
+}
+
+/* Return the Jenkins one-at-a-time hash of n bytes, as JenkHash does. */
+static uint32_t
+rpf__jenk(const uint8_t *d, size_t n)
+{
+	uint32_t h;
+	size_t i;
+
+	h = 0;
+	for (i = 0; i < n; i++) {
+		h += d[i];
+		h += h << 10;
+		h ^= h >> 6;
+	}
+	h += h << 3;
+	h ^= h >> 11;
+	h += h << 15;
+	return h;
+}
+
+/* Return 1 if each of the n pieces of size bytes at p has its digest. */
+static int
+rpf__pieces_ok(const uint8_t *p, const uint8_t (*hashes)[20], int n,
+    size_t size)
+{
+	uint8_t digest[20];
+	int i;
+
+	for (i = 0; i < n; i++) {
+		rpf__sha1(p + (size_t)i * size, size, digest);
+		if (memcmp(digest, hashes[i], 20) != 0)
+			return 0;
+	}
+	return 1;
+}
+
+int
+rpf_keys_magic(RpfKeys *k, const uint8_t *magic, size_t len)
+{
+	struct rpf__netrand r;
+	uint8_t *m, *plain, *ngkeys, *hashlut;
+	const uint8_t *raw;
+	uint32_t *dec;
+	size_t plen, i;
+	int err;
+
+	if (k->aes == NULL)
+		return RPF_ENOKEY;
+	m = RPF_MALLOC(len > 0 ? len : 1);
+	if (m == NULL)
+		return RPF_ENOMEM;
+	memcpy(m, magic, len);
+	/* .NET casts the hash to int. Keep the bits of the hash. */
+	rpf__netrand_init(&r, rpf__s32(rpf__jenk(k->aes, 32)));
+	for (i = 0; i < 4; i++)
+		rpf__netrand_sub(&r, m, len);
+	rpf__aes_decrypt(k->aes, m, len);
+	/* The limit stops a wrong AES key from a large output. */
+	err = rpf__inflate_max(m, len, &plain, &plen, RPF__MG_PLAIN);
+	RPF_FREE(m);
+	if (err == RPF_ENOMEM)
+		return err;
+	if (err == 0 && plen != RPF__MG_PLAIN)
+		err = RPF_EFORMAT;
+	/* Check each part before k changes. */
+	raw = NULL;
+	if (err == 0) {
+		raw = plain + RPF__MG_NGKEYS;
+		if (!rpf__pieces_ok(plain, rpf__hash_ngkeys, 101, 272) ||
+		    !rpf__pieces_ok(raw, rpf__hash_dectables, 272, 1024) ||
+		    !rpf__pieces_ok(raw + RPF__MG_DECTABLES, rpf__hash_lut,
+		    1, RPF__MG_HASHLUT))
+			err = RPF_EFORMAT;
+	}
+	if (err != 0) {
+		RPF_FREE(plain);
+		return RPF_EFORMAT;
+	}
+
+	ngkeys = RPF_MALLOC(RPF__MG_NGKEYS);
+	dec = RPF_MALLOC(RPF__MG_DECTABLES);
+	hashlut = RPF_MALLOC(RPF__MG_HASHLUT);
+	if (ngkeys == NULL || dec == NULL || hashlut == NULL) {
+		RPF_FREE(ngkeys);
+		RPF_FREE(dec);
+		RPF_FREE(hashlut);
+		RPF_FREE(plain);
+		return RPF_ENOMEM;
+	}
+	memcpy(ngkeys, plain, RPF__MG_NGKEYS);
+	/* Assemble the words, so the byte order is fixed. */
+	for (i = 0; i < RPF__MG_DECTABLES / 4; i++)
+		dec[i] = (uint32_t)raw[4 * i] |
+		    (uint32_t)raw[4 * i + 1] << 8 |
+		    (uint32_t)raw[4 * i + 2] << 16 |
+		    (uint32_t)raw[4 * i + 3] << 24;
+	memcpy(hashlut, raw + RPF__MG_DECTABLES, RPF__MG_HASHLUT);
+	RPF_FREE(plain);
+	RPF_FREE(k->ngkeys);
+	RPF_FREE(k->dectables);
+	RPF_FREE(k->hashlut);
+	k->ngkeys = ngkeys;
+	k->dectables = dec;
+	k->hashlut = hashlut;
+	return 0;
 }
 
 int
