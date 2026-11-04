@@ -439,6 +439,26 @@ add_arg(struct rpf_entry *root, const char *arg)
 	return rpf_tree_add_path(root, name.c_str(), arg);
 }
 
+/* Put the path of the key cache folder in buf. Return 0 or -1. */
+static int
+key_cache(char *buf)
+{
+	static const char name[] = "unrage-keys";
+	DWORD n = GetTempPathA(PATH_LEN, buf);
+
+	if (n == 0 || n + sizeof name > PATH_LEN)
+		return -1;
+	memcpy(buf + n, name, sizeof name);
+	return 0;
+}
+
+static void
+progress(const char *msg, void *ud)
+{
+	(void)ud;
+	fprintf(stderr, "unrage: %s\n", msg);
+}
+
 /*
  * Write the tree root as the archive path. If a is not NULL, it is the
  * open archive at path. Then write to a temporary directory with the
@@ -452,11 +472,21 @@ save(struct rpf_entry *root, RpfArchive *a, const char *path, int enc)
 	fs::path tmpdir = fs::path(path).concat(".unrage-tmp");
 	fs::path tmp = a != NULL ? tmpdir / fs::path(path).filename() :
 	    fs::path(path);
+	char dir[PATH_LEN];
 	int err;
 
 	if (a != NULL)
 		fs::create_directory(tmpdir, ec);
 	err = rpf_write(root, tmp.string().c_str(), enc, keys);
+	/* rpf_write checks the keys before it makes the file. */
+	if (err == RPF_ENOKEY && enc == RPF_ENC_NG && keys != nullptr &&
+	    rpf_keys_derive_encrypt(keys, progress, nullptr) == 0) {
+		err = rpf_write(root, tmp.string().c_str(), enc, keys);
+		if (cached && (key_cache(dir) != 0 ||
+		    rpf_keys_save(keys, dir) != 0))
+			fprintf(stderr,
+			    "unrage: cannot save the keys to the cache\n");
+	}
 	rpf_tree_free(root);
 	rpf_close(a);
 	if (a == NULL)
@@ -515,19 +545,6 @@ cmd_modify(const char *path, char **paths, int npaths, int del)
 	if ((err = save(root, a, path, enc)) != 0)
 		return fail(path, err);
 	printf("Everything is Ok\n");
-	return 0;
-}
-
-/* Put the path of the key cache folder in buf. Return 0 or -1. */
-static int
-key_cache(char *buf)
-{
-	static const char name[] = "unrage-keys";
-	DWORD n = GetTempPathA(PATH_LEN, buf);
-
-	if (n == 0 || n + sizeof name > PATH_LEN)
-		return -1;
-	memcpy(buf + n, name, sizeof name);
 	return 0;
 }
 

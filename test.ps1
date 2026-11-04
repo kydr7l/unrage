@@ -112,6 +112,15 @@ try {
 		Run l test.rpf | Out-Null
 		Check (Test-Path "$C\gtav_ng_key.dat") "the registry did not find GTA5.exe"
 
+		# The derive of the encrypt tables takes some minutes, so it runs only on request.
+		if ($env:UNRAGE_SLOW) {
+			Run a -tng ng.rpf src\a.txt | Out-Null
+			Check ((Run l ng.rpf) -match 'Encryption: NG') "a -tng did not write an NG archive"
+			Run x -ong ng.rpf a.txt | Out-Null
+			Same src\a.txt ng\a.txt
+			Check ((Get-Item "$C\gtav_ng_encrypt_luts.dat").Length -eq 53477376) "the LUTs are not in the cache"
+		}
+
 		# With no GTA5.exe and no cache, an NG archive fails and names GTA5.exe.
 		Remove-Item -Recurse -Force $C
 		$msg = & $U l "-g$none" $ng 2>&1 | Out-String
