@@ -142,7 +142,8 @@ again, and you get the same layout.
 
 ## License
 
-unrage uses the MIT license. Refer to `LICENSE`.
+unrage uses the ISC license. The CodeWalker parts of `rpf.h` keep the MIT
+license of CodeWalker. Refer to `LICENSE`.
 
 ## Credit
 
